@@ -1,0 +1,4 @@
+#!/bin/sh
+# Quit a running copy so the new app can replace it.
+pkill -x Scream 2>/dev/null || true
+exit 0

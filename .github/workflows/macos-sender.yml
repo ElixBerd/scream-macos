@@ -1,0 +1,92 @@
+name: macOS sender
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+    paths: ['Senders/macos/**', '.github/workflows/macos-sender.yml']
+  pull_request:
+    paths: ['Senders/macos/**', '.github/workflows/macos-sender.yml']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF#refs/tags/v}"; else v="0.2.0"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Build
+        working-directory: Senders/macos
+        run: make all pkg VERSION=${{ steps.version.outputs.version }} CFLAGS="-O2 -Wall -Wextra -Wno-unused-parameter -Werror"
+      - name: Check bundles
+        working-directory: Senders/macos
+        run: |
+          plutil -lint build/ScreamAudio.driver/Contents/Info.plist build/Scream.app/Contents/Info.plist
+          lipo -info build/ScreamAudio.driver/Contents/MacOS/ScreamAudio build/Scream.app/Contents/MacOS/Scream
+          nm -gU build/ScreamAudio.driver/Contents/MacOS/ScreamAudio | grep ScreamAudio_Create
+          codesign --verify --verbose build/ScreamAudio.driver build/Scream.app
+          pkgutil --payload-files build/Scream-*.pkg
+          build/scream-sender -h
+      - name: Install the pkg like a user would
+        working-directory: Senders/macos
+        run: |
+          sudo installer -pkg build/Scream-*.pkg -target /
+          sleep 5
+          ls /Applications/Scream.app/Contents/Resources
+          system_profiler SPAudioDataType | grep -A6 "Scream Audio"
+          pgrep -x Scream || (open /Applications/Scream.app && sleep 3 && pgrep -x Scream)
+          screamctl
+      - name: App switched the output on first run
+        run: |
+          sleep 2
+          system_profiler SPAudioDataType | grep -A8 "Scream Audio:" | grep "Default Output Device: Yes"
+      - name: Stream a 1 kHz tone and check every sample width
+        working-directory: Senders/macos
+        run: |
+          python3 tests/tones.py /tmp/tone.wav 1000 3
+          check() {   # check BITS: play the tone, decode it on the receiving side
+            python3 tests/listen.py 4010 6 "$1" 1000 &
+            sleep 1
+            afplay /tmp/tone.wav
+            wait $!
+          }
+          for bits in 16 24; do
+            screamctl -u 127.0.0.1 -p 4010 -s 288 -b $bits -d
+            sleep 1
+            check $bits
+          done
+          # 32 bit through the physical format, as Audio MIDI Setup sets it.
+          swift tests/set_physical.swift 32
+          screamctl | tee /dev/stderr | grep -q "32 bit"
+          check 32
+          screamctl -b 16
+      - name: Uninstall
+        run: |
+          sudo rm -rf /Applications/Scream.app   # user drags the app to the Trash first
+          sudo scream-uninstall
+          test ! -e /usr/local/bin/screamctl
+          test ! -e /Applications/Scream.app
+          test ! -e /Library/Audio/Plug-Ins/HAL/ScreamAudio.driver
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Scream-${{ steps.version.outputs.version }}
+          path: Senders/macos/build/Scream-*.pkg
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Works for a tag pushed from git and for a release drafted on github.com.
+          if gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" Senders/macos/build/Scream-*.pkg --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" Senders/macos/build/Scream-*.pkg -R "$GITHUB_REPOSITORY" \
+              --title "Scream for macOS $GITHUB_REF_NAME" --generate-notes
+          fi
+
+permissions:
+  contents: write

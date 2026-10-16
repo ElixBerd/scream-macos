@@ -1,0 +1,57 @@
+name: macOS screenshots
+
+# Installs the pkg on a runner, photographs the installer, the menu bar app
+# and Sound settings, and commits the images to doc/macos on this branch.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  shots:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and install
+        working-directory: Senders/macos
+        run: |
+          python3 -m pip install --break-system-packages pyobjc-framework-Quartz
+          make pkg
+          sudo installer -pkg build/Scream-*.pkg -target /
+          sleep 4
+          mkdir -p ../../doc/macos
+      - name: Installer
+        working-directory: Senders/macos
+        run: |
+          cp build/Scream-*.pkg /tmp/Scream.pkg
+          open /tmp/Scream.pkg
+          python3 tests/screenshot.py window Installer ../../doc/macos/installer.png
+          pkill -x Installer || true
+      - name: Menu bar app
+        working-directory: Senders/macos
+        run: |
+          pkill -x Scream || true
+          sleep 1
+          open /Applications/Scream.app --args -ScreamShowMenu YES
+          python3 tests/screenshot.py menu Scream ../../doc/macos/menu.png
+          pkill -x Scream || true
+      - name: Sound settings
+        working-directory: Senders/macos
+        run: |
+          open "x-apple.systempreferences:com.apple.Sound-Settings.extension"
+          sleep 4
+          python3 tests/screenshot.py window "System Settings" ../../doc/macos/sound-settings.png 0.32,0.535
+      - name: Commit screenshots
+        run: |
+          rm -f doc/macos/*.full.png
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add doc/macos
+          git diff --cached --quiet || git commit -m "Update macOS screenshots"
+          git push
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots
+          path: doc/macos
