@@ -1,0 +1,12 @@
+#!/bin/sh
+# Make coreaudiod load the new driver, then start the menu bar app for the
+# logged-in user. The app turns on Open at Login itself on first launch.
+killall coreaudiod 2>/dev/null || true
+sleep 2
+
+user=$(stat -f%Su /dev/console)
+if [ -n "$user" ] && [ "$user" != "root" ] && [ "$user" != "loginwindow" ]; then
+  uid=$(id -u "$user")
+  launchctl asuser "$uid" sudo -u "$user" open -g /Applications/Scream.app || true
+fi
+exit 0

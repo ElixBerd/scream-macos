@@ -6,28 +6,58 @@ standard Scream stream: 5 byte header + up to 1152 bytes of LSB PCM,
 multicast `239.255.77.77:4010` by default. Any Scream receiver works
 (Unix/PulseAudio/ALSA/JACK, Windows ScreamReader, ESP32, ...).
 
-Works on Apple Silicon and Intel, macOS 12 or newer.
+Works on Apple Silicon and Intel.
 
 ## Install
 
+1. Download `Scream-<version>.pkg` from the
+   [Releases page](https://github.com/ElixBerd/scream-macos/releases) and
+   double-click it.
+2. The package is not notarized by Apple yet, so macOS may refuse to open it.
+   Open System Settings > Privacy & Security, scroll down and click
+   **Open Anyway** next to the Scream message, then run the installer again.
+3. Sound stops for a second while Core Audio reloads. Scream then appears in
+   the menu bar, switches your output to **Scream Audio** and opens at every
+   login.
+
+Requires macOS 13 or newer (the driver alone works on macOS 12).
+
+## The menu bar app
+
+Click the radio-waves icon in the menu bar:
+
+- **Stream to Network** (⌘S) switches the Mac's output to Scream Audio, or
+  back to the speakers/headphones you used before. The icon is dimmed while
+  not streaming.
+- **Receiver**: *All Receivers* (multicast, the default) or a specific IP.
+  Recent IPs are remembered. For a specific IP, start the receiver with
+  `scream -u`.
+- **Latency**: packet size. *Lowest* (1.5 ms at 48 kHz) gives the least delay,
+  *Standard* (6 ms) works with every receiver.
+- **Quality**: 16/24/32-bit and 44.1 to 96 kHz.
+- **Open at Login**, **Uninstall Scream…**
+
+Volume keys and mute work on the Scream Audio device. All settings are kept
+by the driver and survive reboots, even if the app is not running.
+
+## Build from source
+
 ```sh
 cd Senders/macos
-make
+make            # driver, screamctl, Scream.app, tap sender
+make pkg        # build/Scream-<version>.pkg
 sudo make install
 ```
 
-`make install` copies `ScreamAudio.driver` to `/Library/Audio/Plug-Ins/HAL`,
-`screamctl` to `/usr/local/bin`, and restarts Core Audio (sound drops for a
-second). Needs the Xcode Command Line Tools (`xcode-select --install`).
+Needs the Xcode Command Line Tools (`xcode-select --install`). Pushing a tag
+`v*` builds the pkg in GitHub Actions and attaches it to a release.
 
-Then choose **Scream Audio** in System Settings > Sound > Output, or in the
-menu bar sound icon. Volume keys and mute work on the device.
+Uninstall with **Uninstall Scream…** in the menu, `sudo make uninstall`, or
+`sudo /Applications/Scream.app/Contents/Resources/uninstall.sh`.
 
-Uninstall with `sudo make uninstall`.
+## Command line
 
-## Choosing the receiver
-
-The device streams multicast out of the box. To send to one receiver:
+`screamctl` changes the same settings from Terminal:
 
 ```sh
 screamctl -u 192.168.1.50     # unicast to one receiver

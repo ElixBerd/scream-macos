@@ -2,80 +2,37 @@
 //
 // Licensed under MS-PL, like the rest of Scream.
 
-#include <CoreAudio/CoreAudio.h>
-#include <CoreFoundation/CoreFoundation.h>
+#include "../common/scream_device.h"
 #include <arpa/inet.h>
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define kDevice_UID "ScreamAudio_UID"
-#define kScreamConfigProperty 'scfg'
-
-static AudioObjectID findDevice(void)
-{
-  AudioObjectPropertyAddress a = { kAudioHardwarePropertyTranslateUIDToDevice,
-                                   kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
-  CFStringRef uid = CFSTR(kDevice_UID);
-  AudioObjectID dev = kAudioObjectUnknown;
-  UInt32 size = sizeof(dev);
-  if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, sizeof(uid), &uid, &size, &dev) != noErr)
-    return kAudioObjectUnknown;
-  return dev;
-}
-
-static int getInt(CFDictionaryRef d, CFStringRef key)
-{
-  int v = 0;
-  CFNumberRef n = CFDictionaryGetValue(d, key);
-  if (n && CFGetTypeID(n) == CFNumberGetTypeID()) CFNumberGetValue(n, kCFNumberIntType, &v);
-  return v;
-}
-
 static int show(AudioObjectID dev)
 {
-  AudioObjectPropertyAddress a = { kScreamConfigProperty, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
-  CFPropertyListRef pl = NULL;
-  UInt32 size = sizeof(pl);
-  OSStatus st = AudioObjectGetPropertyData(dev, &a, 0, NULL, &size, &pl);
-  if (st != noErr || !pl || CFGetTypeID(pl) != CFDictionaryGetTypeID()) {
-    fprintf(stderr, "Could not read the Scream Audio configuration (%d)\n", (int)st);
-    if (pl) CFRelease(pl);
+  CFDictionaryRef d = scream_copy_config(dev);
+  if (!d) {
+    fprintf(stderr, "Could not read the Scream Audio configuration\n");
     return 1;
   }
-  CFDictionaryRef d = pl;
   char addr[64] = "?";
   CFStringRef s = CFDictionaryGetValue(d, CFSTR("address"));
   if (s) CFStringGetCString(s, addr, sizeof(addr), kCFStringEncodingUTF8);
   struct in_addr ia;
   int multicast = inet_pton(AF_INET, addr, &ia) == 1 && IN_MULTICAST(ntohl(ia.s_addr));
 
-  AudioObjectPropertyAddress ra = { kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
-  Float64 rate = 0;
-  size = sizeof(rate);
-  AudioObjectGetPropertyData(dev, &ra, 0, NULL, &size, &rate);
+  Float64 rate = scream_get_rate(dev);
 
-  int bits = getInt(d, CFSTR("bits"));
-  int payload = getInt(d, CFSTR("payload"));
+  int bits = scream_config_int(d, CFSTR("bits"));
+  int payload = scream_config_int(d, CFSTR("payload"));
   int frameBytes = 2 * (bits / 8);
-  printf("destination  %s:%d (%s)\n", addr, getInt(d, CFSTR("port")), multicast ? "multicast" : "unicast");
-  if (multicast) printf("ttl          %d\n", getInt(d, CFSTR("ttl")));
+  printf("destination  %s:%d (%s)\n", addr, scream_config_int(d, CFSTR("port")), multicast ? "multicast" : "unicast");
+  if (multicast) printf("ttl          %d\n", scream_config_int(d, CFSTR("ttl")));
   printf("format       %.0f Hz, %d bit, stereo\n", rate, bits);
   if (frameBytes > 0 && rate > 0)
     printf("packet       %d bytes (%.2f ms)\n", payload, 1000.0 * (payload / frameBytes) / rate);
-  CFRelease(pl);
-  return 0;
-}
-
-static int makeDefault(AudioObjectID dev)
-{
-  AudioObjectPropertySelector sels[] = { kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDefaultSystemOutputDevice };
-  for (int i = 0; i < 2; i++) {
-    AudioObjectPropertyAddress a = { sels[i], kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
-    OSStatus st = AudioObjectSetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, sizeof(dev), &dev);
-    if (st != noErr) { fprintf(stderr, "Could not set default output (%d)\n", (int)st); return 1; }
-  }
+  CFRelease(d);
   return 0;
 }
 
@@ -109,7 +66,7 @@ int main(int argc, char *argv[])
       case 'g': {
         const char *addr = optarg;
         if (c == 'g' && !addr && optind < argc && argv[optind][0] != '-') addr = argv[optind++];
-        if (!addr) addr = "239.255.77.77";
+        if (!addr) addr = SCREAM_DEFAULT_GROUP;
         struct in_addr ia;
         if (inet_pton(AF_INET, addr, &ia) != 1) { fprintf(stderr, "Invalid address: %s\n", addr); return 1; }
         if (c == 'u' && IN_MULTICAST(ntohl(ia.s_addr))) { fprintf(stderr, "%s is a multicast address, use -g\n", addr); return 1; }
@@ -135,16 +92,14 @@ int main(int argc, char *argv[])
     CFRelease(n);
   }
 
-  AudioObjectID dev = findDevice();
+  AudioObjectID dev = scream_find_device();
   if (dev == kAudioObjectUnknown) {
     fprintf(stderr, "Scream Audio device not found. Is the driver installed? (make install)\n");
     return 1;
   }
 
   if (CFDictionaryGetCount(changes) > 0) {
-    AudioObjectPropertyAddress a = { kScreamConfigProperty, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
-    CFPropertyListRef pl = changes;
-    OSStatus st = AudioObjectSetPropertyData(dev, &a, 0, NULL, sizeof(pl), &pl);
+    OSStatus st = scream_set_config(dev, changes);
     if (st != noErr) {
       fprintf(stderr, "The driver rejected these settings (%d). Check the values with -h.\n", (int)st);
       return 1;
@@ -152,6 +107,9 @@ int main(int argc, char *argv[])
   }
   CFRelease(changes);
 
-  if (setDefault && makeDefault(dev)) return 1;
+  if (setDefault) {
+    OSStatus st = scream_set_default_output(dev);
+    if (st != noErr) { fprintf(stderr, "Could not set default output (%d)\n", (int)st); return 1; }
+  }
   return show(dev);
 }
