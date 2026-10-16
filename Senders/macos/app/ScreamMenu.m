@@ -62,6 +62,12 @@ static const Float64 kRates[] = { 44100, 48000, 88200, 96000 };
     if (scream_find_device() != kAudioObjectUnknown) [self setStreaming:YES];
   }
   [self refreshIcon];
+
+  // `Scream -ScreamShowMenu YES` pops the menu open, for README screenshots.
+  if ([ud boolForKey:@"ScreamShowMenu"])
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+      [self.item.button performClick:nil];
+    });
 }
 
 // ---------------------------------------------------------------- state

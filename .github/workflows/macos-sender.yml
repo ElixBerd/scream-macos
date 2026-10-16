@@ -54,7 +54,9 @@ jobs:
           wait $!
       - name: Uninstall
         run: |
-          sudo /Applications/Scream.app/Contents/Resources/uninstall.sh
+          sudo rm -rf /Applications/Scream.app   # user drags the app to the Trash first
+          sudo scream-uninstall
+          test ! -e /usr/local/bin/screamctl
           test ! -e /Applications/Scream.app
           test ! -e /Library/Audio/Plug-Ins/HAL/ScreamAudio.driver
       - uses: actions/upload-artifact@v4

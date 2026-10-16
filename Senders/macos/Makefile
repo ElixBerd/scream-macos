@@ -87,6 +87,7 @@ $(PKG): driver screamctl app pkg/distribution.xml pkg/resources/welcome.html pkg
 	cp -R $(APP) $(BUILD)/pkgroot/Applications/
 	cp -R $(DRIVER) $(BUILD)/pkgroot$(HALDIR)/
 	cp $(BUILD)/screamctl $(BUILD)/pkgroot/usr/local/bin/
+	cp pkg/uninstall.sh $(BUILD)/pkgroot/usr/local/bin/scream-uninstall
 	pkgbuild --analyze --root $(BUILD)/pkgroot $(BUILD)/component.plist
 	for i in 0 1 2 3 4 5; do plutil -replace $$i.BundleIsRelocatable -bool NO $(BUILD)/component.plist 2>/dev/null || break; done
 	pkgbuild --root $(BUILD)/pkgroot --component-plist $(BUILD)/component.plist \
@@ -105,6 +106,7 @@ install: driver screamctl app
 	cp -R $(APP) /Applications/
 	mkdir -p $(PREFIX)/bin
 	cp $(BUILD)/screamctl $(PREFIX)/bin/
+	cp pkg/uninstall.sh $(PREFIX)/bin/scream-uninstall
 	killall coreaudiod || true
 
 uninstall:
