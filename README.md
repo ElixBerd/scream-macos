@@ -99,6 +99,11 @@ Receivers can usually be run as unprivileged users. Receiver
 systems that have an input **firewall need to open UDP port 4010**,
 or whatever custom port you use.
 
+Senders
+---------------------------------------------------------------
+- macOS 12+ (Apple Silicon and Intel): a "Scream Audio" output device that
+  streams to any Scream receiver. See [Senders/macos](Senders/macos/README.md).
+
 Analysis tools
 ---------------------------------------------------------------
 - Wireshark dissector: the `tools/wireshark` folder contains a Lua plugin that

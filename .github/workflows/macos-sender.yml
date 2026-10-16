@@ -1,0 +1,49 @@
+name: macOS sender
+
+on:
+  push:
+    paths: ['Senders/macos/**', '.github/workflows/macos-sender.yml']
+  pull_request:
+    paths: ['Senders/macos/**', '.github/workflows/macos-sender.yml']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        working-directory: Senders/macos
+        run: make CFLAGS="-O2 -Wall -Wextra -Wno-unused-parameter -Werror"
+      - name: Check bundle
+        working-directory: Senders/macos
+        run: |
+          plutil -lint build/ScreamAudio.driver/Contents/Info.plist
+          lipo -info build/ScreamAudio.driver/Contents/MacOS/ScreamAudio
+          nm -gU build/ScreamAudio.driver/Contents/MacOS/ScreamAudio | grep ScreamAudio_Create
+          codesign --verify --verbose build/ScreamAudio.driver
+          build/scream-sender -h
+      - name: Load driver into coreaudiod
+        working-directory: Senders/macos
+        run: |
+          sudo make install
+          sleep 5
+          system_profiler SPAudioDataType | grep -A3 "Scream Audio"
+          screamctl
+          screamctl -u 127.0.0.1 -s 288
+          screamctl -g
+      - name: Stream a sound to localhost
+        working-directory: Senders/macos
+        run: |
+          screamctl -u 127.0.0.1 -p 4010 -s 1152 -b 16 -d
+          python3 tests/listen.py 4010 8 &
+          sleep 1
+          for i in 1 2 3; do afplay /System/Library/Sounds/Glass.aiff; done
+          wait $!
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scream-macos
+          path: |
+            Senders/macos/build/ScreamAudio.driver
+            Senders/macos/build/screamctl
+            Senders/macos/build/scream-sender
