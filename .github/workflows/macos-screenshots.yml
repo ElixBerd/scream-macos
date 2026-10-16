@@ -4,9 +4,6 @@ name: macOS screenshots
 # and Sound settings, and commits the images to doc/macos on this branch.
 on:
   workflow_dispatch:
-  push:
-    branches: [macos-sender]
-    paths: ['.github/workflows/macos-screenshots.yml', 'Senders/macos/tests/screenshot.py']
 
 permissions:
   contents: write
@@ -44,7 +41,7 @@ jobs:
         run: |
           open "x-apple.systempreferences:com.apple.Sound-Settings.extension"
           sleep 4
-          python3 tests/screenshot.py window "System Settings" ../../doc/macos/sound-settings.png
+          python3 tests/screenshot.py window "System Settings" ../../doc/macos/sound-settings.png 0.32,0.535
       - name: Commit screenshots
         run: |
           rm -f doc/macos/*.full.png

@@ -52,8 +52,8 @@ sudo make install
 Needs the Xcode Command Line Tools (`xcode-select --install`). Pushing a tag
 `v*` builds the pkg in GitHub Actions and attaches it to a release.
 
-Uninstall with **Uninstall Scream…** in the menu, `sudo make uninstall`, or
-`sudo /Applications/Scream.app/Contents/Resources/uninstall.sh`.
+Uninstall with **Uninstall Scream…** in the menu or `sudo scream-uninstall`
+(also works after the app was dragged to the Trash).
 
 ## Command line
 

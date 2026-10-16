@@ -3,6 +3,9 @@
 
   screenshot.py window OWNER OUT.png     one window of an app, no shadow
   screenshot.py menu OWNER OUT.png       an open menu plus the menu bar above it
+
+An optional last argument X,Y (fractions) keeps only the part of a window
+right of X and below Y.
 """
 import subprocess, sys, time
 import Quartz
@@ -22,12 +25,25 @@ def wait_for(owner, pred=lambda w: True, timeout=20):
         Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID)})
     sys.exit(f"no window for {owner}; on screen: {all_owners}")
 
+def crop_png(path, x0, y0, x1, y1):
+    src = Quartz.CGImageSourceCreateWithURL(Quartz.CFURLCreateWithFileSystemPath(None, path, 0, False), None)
+    img = Quartz.CGImageSourceCreateImageAtIndex(src, 0, None)
+    w, h = Quartz.CGImageGetWidth(img), Quartz.CGImageGetHeight(img)
+    crop = Quartz.CGImageCreateWithImageInRect(img, Quartz.CGRectMake(x0 * w, y0 * h, (x1 - x0) * w, (y1 - y0) * h))
+    dest = Quartz.CGImageDestinationCreateWithURL(
+        Quartz.CFURLCreateWithFileSystemPath(None, path, 0, False), "public.png", 1, None)
+    Quartz.CGImageDestinationAddImage(dest, crop, None)
+    Quartz.CGImageDestinationFinalize(dest)
+
 mode, owner, out = sys.argv[1:4]
 if mode == "window":
     w = max(wait_for(owner, lambda w: w["kCGWindowLayer"] == 0),
             key=lambda w: w["kCGWindowBounds"]["Width"] * w["kCGWindowBounds"]["Height"])
     time.sleep(1)
     subprocess.check_call(["screencapture", "-x", "-o", "-l", str(w["kCGWindowNumber"]), out])
+    if len(sys.argv) > 4:
+        fx, fy = (float(v) for v in sys.argv[4].split(","))
+        crop_png(out, fx, fy, 1.0, 1.0)
 else:
     w = wait_for(owner, lambda w: w["kCGWindowLayer"] > 0)[0]
     b = w["kCGWindowBounds"]
