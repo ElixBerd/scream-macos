@@ -47,7 +47,7 @@ Click the radio-waves icon in the menu bar:
 | **Stream to Network** (⌘S) | Switches the Mac's output to Scream Audio, or back to the speakers or headphones you used before. The icon is dimmed while not streaming. |
 | **Receiver** | *All Receivers* (multicast, the default) or one receiver by IP address. Recent addresses are remembered. |
 | **Latency** | Packet size. *Lowest* (1.5 ms at 48 kHz) has the least delay; *Standard* (6 ms) works with every receiver. |
-| **Quality** | 16, 24 or 32 bit; 44.1, 48, 88.2 or 96 kHz. 48 kHz / 16 bit is plenty for most setups. |
+| **Quality** | 16, 24 or 32 bit; 44.1, 48, 88.2 or 96 kHz. 48 kHz / 16 bit is plenty for most setups. The Format menu for Scream Audio in Audio MIDI Setup changes the same setting. |
 | **Open at Login** | Start Scream with your Mac (on by default). |
 | **Uninstall Scream…** | Removes everything, see below. |
 

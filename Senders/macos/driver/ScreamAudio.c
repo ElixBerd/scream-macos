@@ -3,11 +3,16 @@
 //
 // This is an AudioServerPlugIn (user-space HAL driver) loaded by coreaudiod,
 // structured after Apple's NullAudio sample. The device clock runs off
-// mach_absolute_time(). On every IO cycle the HAL hands us the final mix in
-// DoIOOperation(WriteMix); we convert it to LSB PCM and send it straight out
-// with a non-blocking sendto(), the same way the Windows driver does from its
-// kernel DMA callback. Nothing is buffered on our side besides filling the
-// current packet.
+// mach_absolute_time(). The stream's physical format is 16, 24 or 32 bit
+// integer PCM, i.e. exactly what Scream puts on the wire, so the HAL does the
+// float -> integer conversion and every IO cycle DoIOOperation(WriteMix) just
+// copies the bytes into packets and sends them with a non-blocking sendto(),
+// the same way the Windows driver does from its kernel DMA callback. Volume,
+// mute and 16 bit dither are applied to the float mix in ProcessMix. Nothing
+// is buffered on our side besides filling the current packet.
+//
+// The sample width can be picked in Audio MIDI Setup (the physical format),
+// in the menu bar app or with screamctl; all three end up in the same place.
 //
 // Destination, sample width and packet size live in a custom property
 // ('scfg', a CFDictionary) that screamctl reads and writes; the driver keeps
@@ -69,6 +74,9 @@ enum {
 
 static const Float64 kSampleRates[] = { 44100.0, 48000.0, 88200.0, 96000.0 };
 #define kNumSampleRates (sizeof(kSampleRates) / sizeof(kSampleRates[0]))
+static const UInt32 kBitDepths[] = { 16, 24, 32 };
+#define kNumBitDepths (sizeof(kBitDepths) / sizeof(kBitDepths[0]))
+#define kNumPhysicalFormats (kNumSampleRates * kNumBitDepths)
 
 // ---------------------------------------------------------------- state
 
@@ -78,6 +86,7 @@ static AudioServerPlugInHostRef gHost = NULL;
 static UInt32 gRefCount = 0;
 
 static Float64 gSampleRate = 48000.0;
+static UInt32 gBits = kDefaultBits;     // physical format = wire format
 static UInt32 gIOClients = 0;
 static Float64 gHostTicksPerFrame = 0;
 static UInt64 gAnchorHostTime = 0;
@@ -145,6 +154,26 @@ static bool validRate(Float64 rate)
   return false;
 }
 
+static bool validBits(UInt32 bits)
+{
+  return bits == 16 || bits == 24 || bits == 32;
+}
+
+// Physical format: packed little-endian signed integers, as Scream sends them.
+static void fillPhysical(AudioStreamBasicDescription *f, Float64 rate, UInt32 bits)
+{
+  f->mSampleRate = rate;
+  f->mFormatID = kAudioFormatLinearPCM;
+  f->mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+  f->mBytesPerPacket = kChannels * (bits / 8);
+  f->mFramesPerPacket = 1;
+  f->mBytesPerFrame = kChannels * (bits / 8);
+  f->mChannelsPerFrame = kChannels;
+  f->mBitsPerChannel = bits;
+  f->mReserved = 0;
+}
+
+// Virtual format: what clients see and the HAL mixes in.
 static void fillFormat(AudioStreamBasicDescription *f, Float64 rate)
 {
   f->mSampleRate = rate;
@@ -248,7 +277,7 @@ static void txRefreshConfig(void)
   os_unfair_lock_unlock(&gConfigLock);
 
   gTx.generation = gen;
-  gTx.bytesPerSample = c.bits / 8;
+  gTx.bytesPerSample = (int)gBits / 8;   // gBits only changes while IO is stopped
   int frameBytes = kChannels * gTx.bytesPerSample;
   gTx.payload = (c.payload / frameBytes) * frameBytes;
   gTx.fill = 0;
@@ -263,7 +292,6 @@ static void txRefreshConfig(void)
     setsockopt(gTx.sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
   }
 
-  gTx.packet[1] = (uint8_t)c.bits;
   gTx.packet[2] = kChannels;
   gTx.packet[3] = kChannelMaskStereo & 0xff;
   gTx.packet[4] = (kChannelMaskStereo >> 8) & 0xff;
@@ -295,43 +323,43 @@ static inline void txFlush(void)
   gTx.fill = 0;
 }
 
-static inline void txSample(float x)
+// ProcessMix: the full mix in float, before the HAL converts it to integers.
+static void processMix(Float32 *buf, UInt32 frames)
 {
-  uint8_t *p = gTx.packet + kHeaderSize + gTx.fill;
-  if (gTx.bytesPerSample == 2) {
-    gTx.rng = gTx.rng * 1664525u + 1013904223u;
-    float r1 = (float)(gTx.rng >> 8) * (1.0f / 16777216.0f);
-    gTx.rng = gTx.rng * 1664525u + 1013904223u;
-    float r2 = (float)(gTx.rng >> 8) * (1.0f / 16777216.0f);
-    float v = x * 32767.0f + (r1 - r2);     // TPDF dither, +-1 LSB
-    if (v > 32767.0f) v = 32767.0f;
-    if (v < -32768.0f) v = -32768.0f;
-    int16_t s = (int16_t)lrintf(v);
-    p[0] = (uint8_t)s; p[1] = (uint8_t)(s >> 8);
-  } else {
-    double v = (double)x * 2147483647.0;
-    if (v > 2147483647.0) v = 2147483647.0;
-    if (v < -2147483648.0) v = -2147483648.0;
-    int32_t s = (int32_t)lrint(v);
-    if (gTx.bytesPerSample == 3) {
-      p[0] = (uint8_t)(s >> 8); p[1] = (uint8_t)(s >> 16); p[2] = (uint8_t)(s >> 24);
-    } else {
-      p[0] = (uint8_t)s; p[1] = (uint8_t)(s >> 8); p[2] = (uint8_t)(s >> 16); p[3] = (uint8_t)(s >> 24);
+  float gain = atomic_load_explicit(&gMute, memory_order_relaxed)
+             ? 0.0f : volumeToGain(atomic_load_explicit(&gVolume, memory_order_relaxed));
+  bool dither = gBits == 16;
+  if (gain == 1.0f && !dither) return;
+  for (UInt32 i = 0; i < frames * kChannels; i++) {
+    float x = buf[i] * gain;
+    if (dither) {
+      // TPDF dither, +-1 LSB of 16 bit.
+      gTx.rng = gTx.rng * 1664525u + 1013904223u;
+      float r1 = (float)(gTx.rng >> 8) * (1.0f / 16777216.0f);
+      gTx.rng = gTx.rng * 1664525u + 1013904223u;
+      float r2 = (float)(gTx.rng >> 8) * (1.0f / 16777216.0f);
+      x += (r1 - r2) * (1.0f / 32768.0f);
     }
+    buf[i] = x;
   }
-  gTx.fill += gTx.bytesPerSample;
 }
 
-static void txWrite(const Float32 *buf, UInt32 frames)
+// WriteMix: the mix in the physical format, which is already Scream PCM.
+static void txWrite(const uint8_t *buf, UInt32 frames)
 {
   txRefreshConfig();
   if (gTx.payload <= 0) return;
   gTx.packet[0] = (uint8_t)rateByte(gSampleRate);
+  gTx.packet[1] = (uint8_t)gBits;
 
-  float gain = atomic_load_explicit(&gMute, memory_order_relaxed)
-             ? 0.0f : volumeToGain(atomic_load_explicit(&gVolume, memory_order_relaxed));
-  for (UInt32 i = 0; i < frames * kChannels; i++) {
-    txSample(buf[i] * gain);
+  UInt32 left = frames * kChannels * (UInt32)gTx.bytesPerSample;
+  while (left > 0) {
+    UInt32 n = (UInt32)(gTx.payload - gTx.fill);
+    if (n > left) n = left;
+    memcpy(gTx.packet + kHeaderSize + gTx.fill, buf, n);
+    gTx.fill += (int)n;
+    buf += n;
+    left -= n;
     if (gTx.fill >= gTx.payload) txFlush();
   }
 }
@@ -448,6 +476,7 @@ static OSStatus Scream_Initialize(AudioServerPlugInDriverRef inDriver, AudioServ
     CFRelease(stored);
   }
   configLoad();
+  gBits = (UInt32)gConfig.bits;
   updateTicksPerFrame();
   openSocket();
   return noErr;
@@ -468,12 +497,21 @@ static OSStatus Scream_RemoveDeviceClient(AudioServerPlugInDriverRef d, AudioObj
 static OSStatus Scream_PerformDeviceConfigurationChange(AudioServerPlugInDriverRef d, AudioObjectID dev, UInt64 action, void *info)
 {
   if (d != gDriverRef || dev != kObjectID_Device) return kAudioHardwareBadObjectError;
-  Float64 rate = (Float64)action;
-  if (!validRate(rate)) return kAudioHardwareBadObjectError;
+  // action = (sample rate << 8) | bits, see requestFormat().
+  Float64 rate = (Float64)(action >> 8);
+  UInt32 bits = (UInt32)(action & 0xff);
+  if (!validRate(rate) || !validBits(bits)) return kAudioHardwareBadObjectError;
   pthread_mutex_lock(&gStateMutex);
   gSampleRate = rate;
+  gBits = bits;
   updateTicksPerFrame();
   pthread_mutex_unlock(&gStateMutex);
+
+  os_unfair_lock_lock(&gConfigLock);
+  gConfig.bits = (int)bits;
+  os_unfair_lock_unlock(&gConfigLock);
+  atomic_fetch_add_explicit(&gConfigGeneration, 1, memory_order_release);
+  configStore();
 
   CFNumberRef n = CFNumberCreate(NULL, kCFNumberFloat64Type, &rate);
   gHost->WriteToStorage(gHost, CFSTR("sample rate"), n);
@@ -701,8 +739,9 @@ static OSStatus Scream_GetPropertyDataSize(AudioServerPlugInDriverRef d, AudioOb
         case kAudioStreamPropertyPhysicalFormat:
           *outSize = sizeof(AudioStreamBasicDescription); return noErr;
         case kAudioStreamPropertyAvailableVirtualFormats:
-        case kAudioStreamPropertyAvailablePhysicalFormats:
           *outSize = kNumSampleRates * sizeof(AudioStreamRangedDescription); return noErr;
+        case kAudioStreamPropertyAvailablePhysicalFormats:
+          *outSize = kNumPhysicalFormats * sizeof(AudioStreamRangedDescription); return noErr;
         default:
           *outSize = sizeof(UInt32); return noErr;
       }
@@ -872,13 +911,27 @@ static OSStatus Scream_GetPropertyData(AudioServerPlugInDriverRef d, AudioObject
         case kAudioStreamPropertyPhysicalFormat: {
           if (inDataSize < sizeof(AudioStreamBasicDescription)) return kAudioHardwareBadPropertySizeError;
           pthread_mutex_lock(&gStateMutex);
-          fillFormat((AudioStreamBasicDescription *)outData, gSampleRate);
+          if (a->mSelector == kAudioStreamPropertyPhysicalFormat)
+            fillPhysical((AudioStreamBasicDescription *)outData, gSampleRate, gBits);
+          else
+            fillFormat((AudioStreamBasicDescription *)outData, gSampleRate);
           pthread_mutex_unlock(&gStateMutex);
           *outDataSize = sizeof(AudioStreamBasicDescription);
           return noErr;
         }
-        case kAudioStreamPropertyAvailableVirtualFormats:
         case kAudioStreamPropertyAvailablePhysicalFormats: {
+          UInt32 n = inDataSize / sizeof(AudioStreamRangedDescription);
+          if (n > kNumPhysicalFormats) n = kNumPhysicalFormats;
+          AudioStreamRangedDescription *r = (AudioStreamRangedDescription *)outData;
+          for (UInt32 i = 0; i < n; i++) {
+            Float64 rate = kSampleRates[i / kNumBitDepths];
+            fillPhysical(&r[i].mFormat, rate, kBitDepths[i % kNumBitDepths]);
+            r[i].mSampleRateRange.mMinimum = r[i].mSampleRateRange.mMaximum = rate;
+          }
+          *outDataSize = n * sizeof(AudioStreamRangedDescription);
+          return noErr;
+        }
+        case kAudioStreamPropertyAvailableVirtualFormats: {
           UInt32 n = inDataSize / sizeof(AudioStreamRangedDescription);
           if (n > kNumSampleRates) n = kNumSampleRates;
           AudioStreamRangedDescription *r = (AudioStreamRangedDescription *)outData;
@@ -950,15 +1003,19 @@ static void notify(AudioObjectID obj, AudioObjectPropertySelector sel, AudioObje
   gHost->PropertiesChanged(gHost, obj, n, a);
 }
 
-static OSStatus requestRate(Float64 rate)
+// Sample rate and width change together: the HAL stops IO, calls
+// PerformDeviceConfigurationChange with this action, and restarts IO.
+// bits == 0 keeps the current width.
+static OSStatus requestFormat(Float64 rate, UInt32 bits)
 {
-  if (!validRate(rate)) return kAudioHardwareIllegalOperationError;
   pthread_mutex_lock(&gStateMutex);
-  Float64 cur = gSampleRate;
+  Float64 curRate = gSampleRate;
+  UInt32 curBits = gBits;
   pthread_mutex_unlock(&gStateMutex);
-  if (rate == cur) return noErr;
-  // The HAL calls PerformDeviceConfigurationChange once IO is quiesced.
-  UInt64 action = (UInt64)rate;
+  if (bits == 0) bits = curBits;
+  if (!validRate(rate) || !validBits(bits)) return kAudioHardwareIllegalOperationError;
+  if (rate == curRate && bits == curBits) return noErr;
+  UInt64 action = ((UInt64)lround(rate) << 8) | bits;
   dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
     gHost->RequestDeviceConfigurationChange(gHost, kObjectID_Device, action, NULL);
   });
@@ -978,7 +1035,7 @@ static OSStatus Scream_SetPropertyData(AudioServerPlugInDriverRef d, AudioObject
     case kObjectID_Device:
       if (a->mSelector == kAudioDevicePropertyNominalSampleRate) {
         if (inDataSize != sizeof(Float64)) return kAudioHardwareBadPropertySizeError;
-        return requestRate(*(const Float64 *)inData);
+        return requestFormat(*(const Float64 *)inData, 0);
       }
       if (a->mSelector == kScreamConfigProperty) {
         if (inDataSize != sizeof(CFPropertyListRef)) return kAudioHardwareBadPropertySizeError;
@@ -991,17 +1048,31 @@ static OSStatus Scream_SetPropertyData(AudioServerPlugInDriverRef d, AudioObject
         atomic_fetch_add_explicit(&gConfigGeneration, 1, memory_order_release);
         configStore();
         notify(kObjectID_Device, kScreamConfigProperty, kAudioObjectPropertyScopeGlobal);
-        return noErr;
+        // A new sample width is a new physical format.
+        os_unfair_lock_lock(&gConfigLock);
+        UInt32 bits = (UInt32)gConfig.bits;
+        os_unfair_lock_unlock(&gConfigLock);
+        pthread_mutex_lock(&gStateMutex);
+        Float64 rate = gSampleRate;
+        pthread_mutex_unlock(&gStateMutex);
+        return requestFormat(rate, bits);
       }
       break;
 
     case kObjectID_Stream: {
       if (inDataSize != sizeof(AudioStreamBasicDescription)) return kAudioHardwareBadPropertySizeError;
       const AudioStreamBasicDescription *f = (const AudioStreamBasicDescription *)inData;
-      if (f->mFormatID != kAudioFormatLinearPCM || f->mChannelsPerFrame != kChannels ||
-          f->mBitsPerChannel != 32 || !(f->mFormatFlags & kAudioFormatFlagIsFloat))
+      if (f->mFormatID != kAudioFormatLinearPCM || f->mChannelsPerFrame != kChannels)
         return kAudioDeviceUnsupportedFormatError;
-      return requestRate(f->mSampleRate);
+      if (a->mSelector == kAudioStreamPropertyVirtualFormat) {
+        if (f->mBitsPerChannel != 32 || !(f->mFormatFlags & kAudioFormatFlagIsFloat))
+          return kAudioDeviceUnsupportedFormatError;
+        return requestFormat(f->mSampleRate, 0);
+      }
+      // Physical format, e.g. from the Format menu in Audio MIDI Setup.
+      if ((f->mFormatFlags & kAudioFormatFlagIsFloat) || !validBits(f->mBitsPerChannel))
+        return kAudioDeviceUnsupportedFormatError;
+      return requestFormat(f->mSampleRate, f->mBitsPerChannel);
     }
 
     case kObjectID_Volume: {
@@ -1072,7 +1143,7 @@ static OSStatus Scream_WillDoIOOperation(AudioServerPlugInDriverRef d, AudioObje
                                          Boolean *outWillDo, Boolean *outInPlace)
 {
   if (d != gDriverRef || dev != kObjectID_Device) return kAudioHardwareBadObjectError;
-  *outWillDo = op == kAudioServerPlugInIOOperationWriteMix;
+  *outWillDo = op == kAudioServerPlugInIOOperationProcessMix || op == kAudioServerPlugInIOOperationWriteMix;
   *outInPlace = true;
   return noErr;
 }
@@ -1088,8 +1159,11 @@ static OSStatus Scream_DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID
                                      void *mainBuffer, void *secondaryBuffer)
 {
   if (d != gDriverRef || dev != kObjectID_Device) return kAudioHardwareBadObjectError;
-  if (op == kAudioServerPlugInIOOperationWriteMix && mainBuffer)
-    txWrite((const Float32 *)mainBuffer, frames);
+  if (!mainBuffer) return noErr;
+  if (op == kAudioServerPlugInIOOperationProcessMix)
+    processMix((Float32 *)mainBuffer, frames);
+  else if (op == kAudioServerPlugInIOOperationWriteMix)
+    txWrite((const uint8_t *)mainBuffer, frames);
   return noErr;
 }
 

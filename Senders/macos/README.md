@@ -85,10 +85,14 @@ Settings are stored by the driver and survive reboots. The sample rate
 loaded by `coreaudiod`. No kernel extension, no SIP changes.
 
 - The device clock runs on `mach_absolute_time()`.
-- On each IO cycle Core Audio hands the driver the final mix of all apps. The
-  driver converts it to 16/24/32 bit PCM (TPDF dither for 16 bit) and sends
-  it right away with a non-blocking `sendto()`. Nothing is queued besides the
-  packet being filled, so the Mac adds roughly one IO buffer of delay.
+- The stream's physical format is 16, 24 or 32 bit integer PCM, which is
+  exactly what Scream sends, so it shows up in Audio MIDI Setup's Format menu
+  and changing it there changes the network format. Core Audio converts its
+  float mix to that format; the driver applies volume, mute and 16 bit TPDF
+  dither just before.
+- On each IO cycle the driver copies the converted mix into packets and sends
+  them right away with a non-blocking `sendto()`. Nothing is queued besides
+  the packet being filled, so the Mac adds roughly one IO buffer of delay.
 - Packets are marked DSCP EF / `NET_SERVICE_TYPE_VO` so Wi-Fi sends them in
   the voice queue.
 

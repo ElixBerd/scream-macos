@@ -44,14 +44,26 @@ jobs:
         run: |
           sleep 2
           system_profiler SPAudioDataType | grep -A8 "Scream Audio:" | grep "Default Output Device: Yes"
-      - name: Stream a sound to localhost
+      - name: Stream a 1 kHz tone and check every sample width
         working-directory: Senders/macos
         run: |
-          screamctl -u 127.0.0.1 -p 4010 -s 288 -b 16 -d
-          python3 tests/listen.py 4010 8 &
-          sleep 1
-          for i in 1 2 3; do afplay /System/Library/Sounds/Glass.aiff; done
-          wait $!
+          python3 tests/tones.py /tmp/tone.wav 1000 3
+          check() {   # check BITS: play the tone, decode it on the receiving side
+            python3 tests/listen.py 4010 6 "$1" 1000 &
+            sleep 1
+            afplay /tmp/tone.wav
+            wait $!
+          }
+          for bits in 16 24; do
+            screamctl -u 127.0.0.1 -p 4010 -s 288 -b $bits -d
+            sleep 1
+            check $bits
+          done
+          # 32 bit through the physical format, as Audio MIDI Setup sets it.
+          swift tests/set_physical.swift 32
+          screamctl | tee /dev/stderr | grep -q "32 bit"
+          check 32
+          screamctl -b 16
       - name: Uninstall
         run: |
           sudo rm -rf /Applications/Scream.app   # user drags the app to the Trash first
